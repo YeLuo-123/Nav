@@ -1,0 +1,295 @@
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: odom
+    robot_base_frame: base_link
+    odom_topic: /s2_lidar_slam/odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 2000
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node
+
+bt_navigator_navigate_through_poses_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false
+
+bt_navigator_navigate_to_pose_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 15.0
+    min_x_velocity_threshold: 0.01
+    min_y_velocity_threshold: 0.01
+    min_theta_velocity_threshold: 0.01
+    failure_tolerance: 0.5
+    odom_topic: /s2_lidar_slam/odom
+    progress_checker_plugin: progress_checker
+    goal_checker_plugins: [general_goal_checker]
+    controller_plugins: [FollowPath]
+    progress_checker:
+      plugin: nav2_controller::SimpleProgressChecker
+      required_movement_radius: 0.20
+      # Allow a blocked navigation goal to remain active while a person or
+      # other moving obstacle passes. The controller resumes once lidar
+      # clearing removes the obstacle from the local costmap.
+      movement_time_allowance: 120.0
+    general_goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      stateful: true
+      xy_goal_tolerance: 0.20
+      yaw_goal_tolerance: 0.20
+    FollowPath:
+      plugin: dwb_core::DWBLocalPlanner
+      debug_trajectory_details: true
+      min_vel_x: -0.15
+      min_vel_y: -0.15
+      max_vel_x: 0.25
+      max_vel_y: 0.20
+      max_vel_theta: 0.50
+      min_speed_xy: 0.0
+      max_speed_xy: 0.25
+      min_speed_theta: 0.0
+      acc_lim_x: 0.50
+      acc_lim_y: 0.50
+      acc_lim_theta: 0.80
+      decel_lim_x: -0.60
+      decel_lim_y: -0.60
+      decel_lim_theta: -1.00
+      vx_samples: 15
+      vy_samples: 11
+      vtheta_samples: 15
+      sim_time: 1.5
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.30
+      xy_goal_tolerance: 0.20
+      trans_stopped_velocity: 0.05
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      critics:
+        [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist]
+      BaseObstacle.scale: 0.03
+      PathAlign.scale: 24.0
+      PathAlign.forward_point_distance: 0.10
+      GoalAlign.scale: 18.0
+      GoalAlign.forward_point_distance: 0.10
+      PathDist.scale: 24.0
+      GoalDist.scale: 18.0
+      RotateToGoal.scale: 24.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 8.0
+      publish_frequency: 4.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      footprint: "[[0.43, 0.33], [0.43, -0.33], [-0.43, -0.33], [-0.43, 0.33]]"
+      footprint_padding: 0.03
+      transform_tolerance: 0.30
+      plugins: [voxel_layer, inflation_layer]
+      voxel_layer:
+        plugin: nav2_costmap_2d::VoxelLayer
+        enabled: true
+        publish_voxel_map: true
+        origin_z: 0.0
+        z_resolution: 0.10
+        # Humble's VoxelGrid supports at most 16 vertical cells.
+        z_voxels: 16
+        max_obstacle_height: 1.60
+        mark_threshold: 1
+        observation_sources: pointcloud
+        pointcloud:
+          # Subscribe to the mapper's local relay. The S2 controller DDS
+          # endpoint is unreliable with several late-joining subscribers.
+          topic: /s2_lidar_slam/point_cloud
+          data_type: PointCloud2
+          min_obstacle_height: 0.05
+          max_obstacle_height: 1.60
+          clearing: true
+          marking: true
+          obstacle_min_range: 0.10
+          obstacle_max_range: 6.0
+          raytrace_min_range: 0.10
+          raytrace_max_range: 7.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        # Must exceed the 0.36 m inscribed radius of the padded footprint.
+        inflation_radius: 0.38
+        cost_scaling_factor: 3.0
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      global_frame: odom
+      robot_base_frame: base_link
+      resolution: 0.05
+      track_unknown_space: true
+      footprint: "[[0.43, 0.33], [0.43, -0.33], [-0.43, -0.33], [-0.43, 0.33]]"
+      footprint_padding: 0.03
+      transform_tolerance: 0.30
+      plugins: [static_layer, inflation_layer]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_topic: /s2_lidar_slam/map
+        map_subscribe_transient_local: true
+        subscribe_to_updates: false
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.38
+        cost_scaling_factor: 3.0
+      always_send_full_costmap: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 5.0
+    planner_plugins: [GridBased]
+    GridBased:
+      plugin: nav2_navfn_planner/NavfnPlanner
+      tolerance: 0.25
+      use_astar: true
+      allow_unknown: false
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: [spin, backup, drive_on_heading, assisted_teleop, wait]
+    spin:
+      plugin: nav2_behaviors/Spin
+    backup:
+      plugin: nav2_behaviors/BackUp
+    drive_on_heading:
+      plugin: nav2_behaviors/DriveOnHeading
+    assisted_teleop:
+      plugin: nav2_behaviors/AssistedTeleop
+    wait:
+      plugin: nav2_behaviors/Wait
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_tolerance: 0.30
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.50
+    min_rotational_vel: 0.10
+    rotational_acc_lim: 0.80
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: OPEN_LOOP
+    max_velocity: [0.25, 0.20, 0.50]
+    min_velocity: [-0.15, -0.15, -0.50]
+    max_accel: [0.50, 0.50, 0.80]
+    max_decel: [-0.60, -0.60, -1.00]
+    odom_topic: /s2_lidar_slam/odom
+    odom_duration: 0.1
+    deadband_velocity: [0.01, 0.01, 0.01]
+    velocity_timeout: 0.30
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_link
+    odom_frame_id: odom
+    cmd_vel_in_topic: /s2_nav2/cmd_vel_smoothed
+    cmd_vel_out_topic: /s2_nav2/cmd_vel
+    transform_tolerance: 0.30
+    # Stop if the lidar stream is stale instead of driving blind.
+    # The local relay follows a bursty controller stream; longer loss is
+    # treated as unsafe by both CollisionMonitor and the chassis bridge.
+    source_timeout: 5.00
+    base_shift_correction: true
+    stop_pub_timeout: 1.0
+    polygons: [EmergencyStopZone, CollisionApproach]
+    EmergencyStopZone:
+      type: polygon
+      # Tight physical-contact guard: padded footprint plus about 3-5 cm.
+      points: [0.48, 0.38, 0.48, -0.38, -0.48, -0.38, -0.48, 0.38]
+      action_type: stop
+      max_points: 8
+      visualize: true
+      polygon_pub_topic: /s2_nav2/emergency_stop_zone
+      enabled: true
+    CollisionApproach:
+      type: circle
+      radius: 0.58
+      action_type: approach
+      time_before_collision: 0.8
+      simulation_time_step: 0.05
+      max_points: 8
+      visualize: true
+      polygon_pub_topic: /s2_nav2/collision_approach_zone
+      enabled: true
+    observation_sources: [pointcloud]
+    pointcloud:
+      type: pointcloud
+      topic: /s2_lidar_slam/point_cloud
+      min_height: 0.05
+      max_height: 1.80
+      enabled: true

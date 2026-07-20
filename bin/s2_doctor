@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/setup/s2_bundle_env.sh" "${S2_NETWORK_INTERFACE:-}"
+
+failures=0
+check() {
+  local label="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    printf '[OK]   %s\n' "${label}"
+  else
+    printf '[FAIL] %s\n' "${label}"
+    failures=$((failures + 1))
+  fi
+}
+
+check "Ubuntu 22.04 ROS Humble setup" test -f /opt/ros/humble/setup.bash
+check "wired interface ${S2_NETWORK_INTERFACE}" test -e "/sys/class/net/${S2_NETWORK_INTERFACE}"
+check "Ethernet carrier" test "$(cat "/sys/class/net/${S2_NETWORK_INTERFACE}/carrier" 2>/dev/null || echo 0)" = 1
+check "host address ${S2_HOST_CIDR}" bash -c "ip -4 -o address show dev '${S2_NETWORK_INTERFACE}' | awk '{print \$4}' | grep -Fxq '${S2_HOST_CIDR}'"
+check "S2 controller ${S2_CONTROLLER_IP}" ping -c 1 -W 1 "${S2_CONTROLLER_IP}"
+check "CycloneDDS config" test -s "${S2_CYCLONEDDS_CONFIG}"
+check "S2 URDF" test -s "${S2_URDF_FILE}"
+check "Nav2 workspace" test -f "${S2_NAV2_WS}/install/setup.bash"
+check "static bundle tests" /usr/bin/python3 "${ROOT}/tests/smoke_test.py"
+
+if [[ -f /opt/ros/humble/setup.bash ]]; then
+  set +u
+  source /opt/ros/humble/setup.bash
+  set -u
+  export ROS_DOMAIN_ID="${S2_ROS_DOMAIN_ID}"
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+  export ROS_DISABLE_DAEMON=1
+  export CYCLONEDDS_URI="file://${S2_CYCLONEDDS_CONFIG}"
+  check "fused lidar topic visible" timeout 5 ros2 topic type /driver/lidar/point_cloud/Data
+  check "odometry topic visible" timeout 5 ros2 topic type /controller/odom
+fi
+
+echo "[s2-doctor] failures=${failures}"
+exit "${failures}"
+

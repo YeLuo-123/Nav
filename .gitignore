@@ -1,0 +1,15 @@
+# ROS 2 / colcon generated workspace
+/nav2_ws/
+
+# Runtime maps, session state, and logs
+/output/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Editor and operating-system files
+.vscode/
+.idea/
+*~
+.DS_Store

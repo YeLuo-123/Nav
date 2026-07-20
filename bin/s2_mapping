@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/setup/s2_bundle_env.sh" "${S2_NETWORK_INTERFACE:-}"
+
+ACTION="${1:-status}"
+LAST_ENV="${ROOT}/output/.last_session.env"
+
+load_last_session() {
+  if [[ -z "${S2_LIDAR_OUTPUT_DIR:-}" && -f "${LAST_ENV}" ]]; then
+    source "${LAST_ENV}"
+  fi
+}
+
+case "${ACTION}" in
+  network)
+    exec "${ROOT}/tools/s2_lidar_mapping.sh" network
+    ;;
+  diagnose)
+    export S2_LIDAR_OUTPUT_DIR="${S2_LIDAR_OUTPUT_DIR:-${ROOT}/output/diagnostics_$(date +%Y%m%d_%H%M%S)}"
+    exec "${ROOT}/tools/s2_lidar_mapping.sh" diagnose
+    ;;
+  start)
+    export S2_LIDAR_OUTPUT_DIR="${S2_LIDAR_OUTPUT_DIR:-${ROOT}/output/s2_$(date +%Y%m%d_%H%M%S)}"
+    mkdir -p "${S2_LIDAR_OUTPUT_DIR}"
+    printf 'export S2_LIDAR_OUTPUT_DIR=%q\n' "${S2_LIDAR_OUTPUT_DIR}" >"${LAST_ENV}"
+    printf 'export S2_LIDAR_HTTP_PORT=%q\n' "${S2_LIDAR_HTTP_PORT:-8776}" >>"${LAST_ENV}"
+    "${ROOT}/tools/s2_lidar_mapping.sh" start-registered-cloud
+    echo "[s2-bundle] session=${S2_LIDAR_OUTPUT_DIR}"
+    ;;
+  status|stop)
+    load_last_session
+    if [[ -z "${S2_LIDAR_OUTPUT_DIR:-}" ]]; then
+      echo "[s2-bundle] no previous mapping session; run: $0 start" >&2
+      exit 1
+    fi
+    exec "${ROOT}/tools/s2_lidar_mapping.sh" "${ACTION}"
+    ;;
+  files)
+    load_last_session
+    echo "${S2_LIDAR_OUTPUT_DIR:-no session}"
+    [[ -n "${S2_LIDAR_OUTPUT_DIR:-}" ]] && find "${S2_LIDAR_OUTPUT_DIR}" -maxdepth 2 -type f -printf '%P\n' | sort
+    ;;
+  *)
+    echo "Usage: $0 {network|diagnose|start|status|stop|files}" >&2
+    exit 2
+    ;;
+esac
+

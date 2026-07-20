@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/setup/s2_bundle_env.sh" "${S2_NETWORK_INTERFACE:-}"
+
+# Stop local command producers first.  The direct controller command below is
+# still required because ROS shutdown alone cannot guarantee chassis parking.
+pkill -TERM -f 's2_nav2_navigation.launch.py|s2_nav2_cmd_vel_bridge.py|teleop_twist_keyboard' \
+  >/dev/null 2>&1 || true
+
+exec /usr/bin/python3 "${ROOT}/tools/s2_emergency_stop.py" \
+  --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" \
+  --robot-id "${S2_ROBOT_ID:-1}"

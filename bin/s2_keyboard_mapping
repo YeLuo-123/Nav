@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/setup/s2_bundle_env.sh" "${S2_NETWORK_INTERFACE:-}"
+
+set +u
+source "${ROOT}/tools/s2_nav2_source_env.sh"
+set -u
+
+MODE="${1:-real}"
+case "${MODE}" in
+  preview)
+    MOTION_ARGS=()
+    echo "[s2-keyboard-map] 预览模式：显示建图和速度，但机器人不会运动"
+    ;;
+  real)
+    MOTION_ARGS=(--enable-motion)
+    echo "[s2-keyboard-map] 实机模式：请清空机器人周围区域，并把急停放在手边"
+    ;;
+  *)
+    echo "用法: $0 {real|preview}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! -t 0 ]]; then
+  echo "[s2-keyboard-map] 需要在交互式终端中运行" >&2
+  exit 1
+fi
+
+SESSION="${S2_MAPPING_SESSION:-${ROOT}/output/keyboard_map_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "${SESSION}"
+printf 'export S2_MAPPING_SESSION=%q\n' "${SESSION}" >"${ROOT}/output/.last_keyboard_mapping.env"
+
+PIDS=()
+start_bg() {
+  "$@" &
+  PIDS+=("$!")
+}
+
+cleanup() {
+  trap - EXIT INT TERM
+  for pid in "${PIDS[@]}"; do
+    kill -INT "${pid}" >/dev/null 2>&1 || true
+  done
+  sleep 1
+  for pid in "${PIDS[@]}"; do
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+  done
+  for pid in "${PIDS[@]}"; do
+    wait "${pid}" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT INT TERM
+
+if [[ "${MODE}" == "real" ]]; then
+  # Always begin from a known zero-speed, parked state. This also recovers
+  # cleanly if a previous terminal or WebSocket was closed unexpectedly.
+  if ! /usr/bin/python3 "${ROOT}/tools/s2_emergency_stop.py" \
+    --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" \
+    --robot-id "${S2_ROBOT_ID:-1}"; then
+    echo "[s2-keyboard-map] 驻车确认暂时超时，将由速度桥再次检查底盘状态" >&2
+    sleep 1
+  fi
+fi
+
+start_bg /usr/bin/python3 "${ROOT}/tools/s2_registered_cloud_mapper.py" \
+  --cloud-topic /driver/lidar/point_cloud/Data \
+  --output-cloud-topic /s2_lidar_slam/point_cloud \
+  --odom-topic /controller/odom \
+  --odom-yaw-mode orientation_w \
+  --output-dir "${SESSION}" \
+  --output-prefix map \
+  --cloud-frame-mode base \
+  --cloud-publish-hz 0 \
+  --integration-hz 0.5 \
+  --export-hz 0.1 \
+  --max-rays-per-scan 1200 \
+  --map-frame odom \
+  --min-z 0.25 --max-z 1.20 --max-range 8.0 \
+  --max-cloud-odom-delta-sec 0.05 \
+  --manual-save-only
+
+start_bg /usr/bin/python3 "${ROOT}/tools/s2_lidar_rviz_bridge.py" \
+  --odom-topic /controller/odom \
+  --output-odom-topic /s2_lidar_slam/odom \
+  --parent-frame odom --child-frame base_link \
+  --odom-yaw-mode orientation_w
+
+start_bg ros2 launch "${ROOT}/tools/s2_robot_model.launch.py"
+
+start_bg "${ROOT}/tools/s2_keyboard_mapping_bridge.sh" \
+  --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" \
+  --robot-id "${S2_ROBOT_ID:-1}" \
+  --max-linear-x "${S2_KEYBOARD_MAX_LINEAR_X:-0.06}" \
+  --max-linear-y "${S2_KEYBOARD_MAX_LINEAR_Y:-0.06}" \
+  --max-angular-z "${S2_KEYBOARD_MAX_ANGULAR_Z:-0.20}" \
+  --safety-heartbeat-topic /s2_lidar_slam/cloud_count \
+  --safety-cloud-timeout-sec 5.0 \
+  "${MOTION_ARGS[@]}"
+
+export S2_RVIZ_LOG="${SESSION}/rviz.log"
+start_bg "${ROOT}/tools/s2_mapping_rviz.sh"
+
+sleep 2
+for pid in "${PIDS[@]}"; do
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    echo "[s2-keyboard-map] 子进程启动失败，pid=${pid}" >&2
+    exit 1
+  fi
+done
+
+echo "[s2-keyboard-map] 地图只在按 p 时保存到: ${SESSION}/map.yaml"
+/usr/bin/python3 "${ROOT}/tools/s2_keyboard_mapping_control.py" \
+  --linear "${S2_KEYBOARD_MAX_LINEAR_X:-0.06}" \
+  --strafe "${S2_KEYBOARD_MAX_LINEAR_Y:-0.06}" \
+  --angular "${S2_KEYBOARD_MAX_ANGULAR_Z:-0.20}"

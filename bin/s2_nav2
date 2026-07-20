@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/setup/s2_bundle_env.sh" "${S2_NETWORK_INTERFACE:-}"
+
+MODE="${1:-preview}"
+case "${MODE}" in
+  preview)
+    export S2_NAV2_ENABLE_MOTION=false
+    echo "[s2-bundle] Nav2 preview mode: paths are planned, no command reaches the chassis"
+    ;;
+  real)
+    export S2_NAV2_ENABLE_MOTION=true
+    echo "[s2-bundle] REAL MOTION MODE"
+    echo "[s2-bundle] keep the emergency stop within reach; use only a nearby free-space goal"
+    ;;
+  *)
+    echo "Usage: $0 {preview|real}" >&2
+    exit 2
+    ;;
+esac
+
+exec "${ROOT}/tools/s2_nav2_navigation.sh"
+
