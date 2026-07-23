@@ -17,6 +17,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-id", default="base_link")
     parser.add_argument("--publish-hz", type=float, default=3.0)
     parser.add_argument("--max-points", type=int, default=3000)
+    parser.add_argument(
+        "--restamp-now",
+        action="store_true",
+        help="Stamp the relayed cloud with host ROS time (use with host-restamped odometry).",
+    )
     parser.add_argument("--self-filter-half-x", type=float, default=0.48)
     parser.add_argument("--self-filter-half-y", type=float, default=0.38)
     parser.add_argument(
@@ -131,11 +136,13 @@ def main() -> None:
                 points = points[indices]
 
             header = Header()
-            # Preserve the controller source clock so downstream mapping can
-            # synchronize this cloud with /controller/odom.  Re-stamping with
-            # the host clock makes the streams differ by months after a robot
-            # controller reboot and causes every scan to be rejected.
-            header.stamp = message.header.stamp
+            # Mapping normally preserves the controller clock. Navigation uses
+            # host-restamped odometry, so its cloud must use that same clock.
+            header.stamp = (
+                self.get_clock().now().to_msg()
+                if args.restamp_now
+                else message.header.stamp
+            )
             header.frame_id = str(args.frame_id)
             self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, points))
             self.last_publish_ns = now_ns

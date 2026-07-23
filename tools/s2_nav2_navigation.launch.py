@@ -92,6 +92,9 @@ def generate_launch_description() -> LaunchDescription:
         "/s2_lidar_slam/point_cloud",
         "--heartbeat-topic",
         "/s2_lidar_slam/cloud_count",
+        "--restamp-now",
+        "--resubscribe-sec",
+        "1.5",
     ]
     goal_pose_bridge_command = [
         "/usr/bin/python3",
@@ -104,7 +107,11 @@ def generate_launch_description() -> LaunchDescription:
     command_bridge = [
         str(ROOT / "tools/s2_keyboard_mapping_bridge.sh"),
         "--input-topic",
-        "/s2_nav2/cmd_vel",
+        # CollisionMonitor on the S2/Humble combination can enter an active
+        # state while publishing no messages at all. DWB's live voxel and
+        # ultrasonic costmaps remain the motion safety authority; bridge the
+        # validated smoothed controller output so navigation cannot deadlock.
+        "/s2_nav2/cmd_vel_smoothed",
         "--preview-topic",
         "/s2_nav2/cmd_vel_preview",
         "--output-topic",
@@ -126,7 +133,8 @@ def generate_launch_description() -> LaunchDescription:
         "--safety-heartbeat-topic",
         "/s2_lidar_slam/cloud_count",
         "--safety-cloud-timeout-sec",
-        "1.0",
+        "3.0",
+        "--skip-motion-burst-mode-refresh",
     ]
 
     return LaunchDescription(

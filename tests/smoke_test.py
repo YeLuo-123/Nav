@@ -49,7 +49,7 @@ params = yaml.safe_load(
     (ROOT / "configs/navigation/s2_nav2_params.yaml").read_text(encoding="utf-8")
 )
 footprint = params["local_costmap"]["local_costmap"]["ros__parameters"]["footprint"]
-if "0.43" not in footprint or "0.33" not in footprint:
+if "0.46" not in footprint or "0.36" not in footprint:
     raise SystemExit(f"unexpected Nav2 footprint: {footprint}")
 
 for script in list((ROOT / "bin").iterdir()) + list((ROOT / "setup").glob("*.sh")):
