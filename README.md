@@ -79,11 +79,10 @@ export S2_NETWORK_INTERFACE=<网卡名>
 - `p`：保存地图
 - `Ctrl+C`：退出
 
-地图默认保存到 `output/keyboard_map_<时间戳>/map.yaml`。也可以使用以下入口：
+地图默认保存到 `output/keyboard_map_<时间戳>/map.yaml`。也可以使用 Cartographer 键盘建图：
 
 ```bash
 ./bin/s2_cartographer_keyboard_mapping  # Cartographer 键盘建图
-./bin/s2_autonomous_mapping             # 自主探索建图（实机会运动）
 ```
 
 仅接收并累计点云时，可使用：
@@ -96,7 +95,70 @@ export S2_NETWORK_INTERFACE=<网卡名>
 ./bin/s2_mapping stop
 ```
 
-### 4. Nav2 导航
+### 4. 自动移动建图
+
+自动移动建图使用前沿探索算法：程序从实时占据栅格中寻找“已知自由区域与未知区域的边界”，选择安全的已知自由栅格作为目标，然后通过 Nav2 依次导航到这些目标并持续扩展地图。
+
+> 此功能没有 `preview` 模式，启动后机器人会自动移动。
+
+启动前必须：
+
+- 完成安装、编译和有线网络配置，并确保 `./bin/s2_doctor` 的关键检查通过。
+- 将机器人放在具有足够初始可见自由空间的位置，清空探索区域内的人员、线缆和易倒物品。
+- 确认物理急停可用且始终有人监护。
+- 停止正在运行的键盘控制、键盘建图和其他 Nav2 实例。
+
+启动自动移动建图：
+
+```bash
+export S2_NETWORK_INTERFACE=<网卡名>
+./bin/s2_autonomous_mapping
+```
+
+该命令会一并启动：
+
+- 实时点云占据栅格建图与地图导出
+- Nav2 规划、控制和 RViz
+- 超声波与点云碰撞监控
+- 前沿目标检测与自主探索
+
+默认将地图持续导出到：
+
+```text
+output/autonomous_map_<时间戳>/map.yaml
+```
+
+也可以指定输出目录：
+
+```bash
+export S2_AUTO_MAPPING_SESSION="$PWD/output/my_autonomous_map"
+./bin/s2_autonomous_mapping
+```
+
+探索器参数可以直接追加到命令后。例如，限制候选目标的最远距离为 3 米，并将单个目标超时设为 60 秒：
+
+```bash
+./bin/s2_autonomous_mapping \
+  --max-goal-distance-m 3.0 \
+  --goal-timeout-sec 60
+```
+
+常用探索参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `--min-goal-distance-m` | `0.75` | 候选目标与机器人的最小距离（米） |
+| `--max-goal-distance-m` | `7.0` | 候选目标与机器人的最大距离（米） |
+| `--frontier-standoff-m` | `0.50` | 目标与未知区域边界的退让距离（米） |
+| `--goal-clearance-m` | `0.20` | 目标周围必须保持的已知自由范围（米） |
+| `--goal-timeout-sec` | `90` | 单个探索目标的超时时间（秒） |
+| `--inspection-pause-sec` | `2.0` | 到达目标后的观测等待时间（秒） |
+
+运行时关注 RViz、终端中的 `Exploring frontier` / `Frontier reached` 信息以及机器人周边环境。需要结束时在启动终端按 `Ctrl+C`；脚本会停止相关进程、发送零速度并请求底盘驻车。紧急情况下直接按物理急停，并可在另一终端执行 `./bin/s2_estop`。
+
+自动探索会在暂时找不到可达前沿时等待地图更新并重试，不会自动退出。结束后使用导出的 `map.yaml` 按下一节进行 Nav2 导航。
+
+### 5. Nav2 导航
 
 指定已保存的地图：
 
@@ -140,6 +202,7 @@ export S2_NETWORK_INTERFACE=<网卡名>
 | `./bin/s2_doctor` | 检查环境、网络、构建结果和 ROS 话题 |
 | `./bin/s2_keyboard preview\|real` | 单独进行键盘遥控 |
 | `./bin/s2_keyboard_mapping preview\|real` | 键盘控制并同步建图 |
+| `./bin/s2_autonomous_mapping` | 启动实机前沿探索并自动移动建图 |
 | `./bin/s2_nav2 preview\|real` | 启动 Nav2 预览或实机导航 |
 | `./bin/s2_rviz` | 启动建图 RViz |
 | `./bin/s2_estop` | 停止本机控制源并请求底盘驻车 |
