@@ -131,6 +131,10 @@ start_registered_cloud() {
     --map-frame "${S2_MAP_FRAME:-odom}" \
     --min-z "${S2_LIDAR_MIN_Z:-0.25}" \
     --max-z "${S2_LIDAR_MAX_Z:-1.20}" \
+    --overhang-min-z "${S2_OVERHANG_MIN_Z:-0.35}" \
+    --overhang-max-z "${S2_OVERHANG_MAX_Z:-1.60}" \
+    --overhang-inflation-m "${S2_OVERHANG_INFLATION_M:-0.10}" \
+    --overhang-miss-log-odds "${S2_OVERHANG_MISS_LOG_ODDS:-0.20}" \
     --max-range "${S2_LIDAR_MAX_RANGE_M:-8.0}" \
     --max-cloud-odom-delta-sec "${S2_MAX_CLOUD_ODOM_DELTA_SEC:-0.05}" \
     >"$OUTPUT_DIR/mapper.log" 2>&1 &

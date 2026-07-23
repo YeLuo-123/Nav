@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/setup/s2_bundle_env.sh" "${S2_NETWORK_INTERFACE:-}"
+set +u
+source "${ROOT}/tools/s2_nav2_source_env.sh"
+set -u
+
+if [[ ! -t 0 ]]; then
+  echo "[s2-auto-map] 必须在交互式终端中运行" >&2
+  exit 1
+fi
+
+if pgrep -f 's2_keyboard_mapping_control.py|s2_nav2_navigation.launch.py' >/dev/null; then
+  echo "[s2-auto-map] 检测到键盘控制或 Nav2 已在运行，请先 Ctrl+C 退出旧会话" >&2
+  exit 1
+fi
+
+SESSION="${S2_AUTO_MAPPING_SESSION:-${ROOT}/output/autonomous_map_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "${SESSION}"
+PIDS=()
+start_bg() { "$@" & PIDS+=("$!"); }
+cleanup() {
+  trap - EXIT INT TERM
+  /usr/bin/python3 "${ROOT}/tools/s2_emergency_stop.py" \
+    --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" \
+    --robot-id "${S2_ROBOT_ID:-1}" || true
+  for pid in "${PIDS[@]}"; do kill -INT "${pid}" 2>/dev/null || true; done
+  sleep 2
+  for pid in "${PIDS[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done
+}
+trap cleanup EXIT INT TERM
+
+echo "[s2-auto-map] 实机自主巡检已启用，请保持物理急停在手边"
+
+start_bg /usr/bin/python3 "${ROOT}/tools/s2_registered_cloud_mapper.py" \
+  --cloud-topic /s2_lidar_slam/point_cloud \
+  --output-cloud-topic /s2_lidar_slam/mapping_point_cloud \
+  --odom-topic /controller/odom --odom-yaw-mode orientation_w \
+  --output-dir "${SESSION}" --output-prefix map --cloud-frame-mode base \
+  --cloud-publish-hz 2.0 --integration-hz 2.0 --export-hz 1.0 \
+  --map-frame map --min-z 0.25 --max-z 1.20 --max-range 8.0 \
+  --overhang-min-z 0.35 --overhang-max-z 1.60 \
+  --overhang-inflation-m 0.10 --overhang-miss-log-odds 0.20 \
+  --max-cloud-odom-delta-sec 0.05
+
+export S2_NAV2_ENABLE_MOTION=true
+export S2_NAV2_USE_RVIZ=true
+export S2_NAV2_ALLOW_SHARED_OUTPUT=true
+export S2_NAV2_MAX_LINEAR_X=0.08
+export S2_NAV2_MAX_LINEAR_Y=0.06
+export S2_NAV2_MAX_ANGULAR_Z=0.20
+export S2_NAV2_COMMAND_TRANSPORT=ros_topic
+export S2_NAV2_COMMAND_OUTPUT_TOPIC=/move/ManualMoveCmd
+unset S2_MAP_YAML
+start_bg "${ROOT}/tools/s2_nav2_navigation.sh"
+
+sleep 12
+for pid in "${PIDS[@]}"; do
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    echo "[s2-auto-map] 启动失败，子进程 pid=${pid}" >&2
+    exit 1
+  fi
+done
+
+echo "[s2-auto-map] 地图目录: ${SESSION}"
+echo "[s2-auto-map] Ctrl+C 将停止巡检、发送零速度并驻车"
+/usr/bin/python3 "${ROOT}/tools/s2_frontier_explorer.py" "$@"

@@ -13,6 +13,7 @@ import socket
 import struct
 import time
 import urllib.request
+import urllib.error
 from urllib.parse import urlparse
 
 
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller-timeout-sec", type=float, default=2.0)
     parser.add_argument("--skip-set-manual-mode", action="store_true")
     parser.add_argument("--skip-exit-parking", action="store_true")
+    parser.add_argument("--skip-motion-burst-mode-refresh", action="store_true")
     parser.add_argument("--leave-unparked-on-exit", action="store_true")
     parser.add_argument("--restore-auto-mode-on-exit", action="store_true")
     parser.add_argument("--max-linear-x", type=float, default=0.25)
@@ -49,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     # gaps up to about 2.0 s.  Keep a bounded margin above that; longer loss
     # still forces zero velocity.
     parser.add_argument("--safety-cloud-timeout-sec", type=float, default=2.5)
+    parser.add_argument(
+        "--disable-safety-cloud-check",
+        action="store_true",
+        help="Do not gate motion on the duplicate lidar heartbeat subscription.",
+    )
     parser.add_argument("--enable-motion", action="store_true")
     parser.add_argument("--allow-shared-output", action="store_true")
     return parser.parse_args()
@@ -188,6 +195,7 @@ def main() -> None:
         def __init__(self) -> None:
             super().__init__("s2_nav2_cmd_vel_bridge")
             self.last_command_monotonic = time.monotonic()
+            self.last_output_command = None
             self.sent_nonzero = False
             self.motion_active = False
             self.fatal_error = False
@@ -204,6 +212,7 @@ def main() -> None:
                 if args.transport == "vendor_websocket":
                     self.enable_vendor_websocket()
                 else:
+                    self.enable_ros_topic()
                     self.output_publisher = self.create_publisher(
                         TwistStamped, args.output_topic, 10
                     )
@@ -230,12 +239,18 @@ def main() -> None:
                     self.on_safety_cloud,
                     sensor_qos,
                 )
-            self.create_timer(0.05, self.on_watchdog)
+            # The vendor `server` node publishes zero manual commands at about
+            # 20 Hz.  Refresh the latest validated Nav2 command at 100 Hz so it
+            # is not continuously overwritten, while the watchdog below still
+            # forces zero if Nav2 or lidar updates stop.
+            self.create_timer(0.01, self.on_watchdog)
 
         def on_safety_cloud(self, _msg: PointCloud2 | UInt64) -> None:
             self.last_safety_cloud_monotonic = time.monotonic()
 
         def safety_cloud_fresh(self) -> bool:
+            if args.disable_safety_cloud_check:
+                return True
             if self.last_safety_cloud_monotonic is None:
                 return False
             return (
@@ -270,11 +285,32 @@ def main() -> None:
 
         def set_parking(self, enabled: bool) -> None:
             endpoint = "StartParking" if enabled else "StopParking"
-            post_json(
-                f"{self.controller_base_url}/api/AMR/{endpoint}",
-                {},
-                args.controller_timeout_sec,
-            )
+            try:
+                post_json(
+                    f"{self.controller_base_url}/api/AMR/{endpoint}",
+                    {},
+                    args.controller_timeout_sec,
+                )
+            except urllib.error.HTTPError as exc:
+                if not enabled and exc.code == 409:
+                    return
+                raise
+            except RuntimeError as exc:
+                if not enabled and "conflict" in str(exc).lower():
+                    return
+                raise
+
+        def refresh_controller_mode(self) -> None:
+            if not self.motion_active:
+                return
+            try:
+                self.set_controller_mode(manual=True)
+                self.set_parking(enabled=False)
+                self.parking_released = True
+            except Exception as exc:
+                self.get_logger().warning(
+                    f"Controller manual/unpark refresh failed: {exc}"
+                )
 
         def enable_vendor_websocket(self) -> None:
             try:
@@ -301,6 +337,25 @@ def main() -> None:
             self.motion_active = True
             self.get_logger().warn(
                 "REAL MOTION ENABLED through the vendor soft-manual WebSocket. "
+                "Keep the emergency stop within reach."
+            )
+
+        def enable_ros_topic(self) -> None:
+            try:
+                if not args.skip_set_manual_mode:
+                    self.set_controller_mode(manual=True)
+                if not args.skip_exit_parking:
+                    self.set_parking(enabled=False)
+                    self.parking_released = True
+            except Exception:
+                if self.parking_released:
+                    try:
+                        self.set_parking(enabled=True)
+                    finally:
+                        self.parking_released = False
+                raise
+            self.get_logger().warn(
+                "REAL MOTION ENABLED through the vendor ManualMoveCmd ROS topic. "
                 "Keep the emergency stop within reach."
             )
 
@@ -373,11 +428,38 @@ def main() -> None:
 
         def on_command(self, source: Twist) -> None:
             command = self.make_stamped(source)
+            requested_nonzero = self.is_nonzero(command)
+            # The S2 may pause its LiDAR stream while parked.  A first key
+            # press must therefore wake manual mode before the fresh-cloud
+            # interlock can pass.  Keep this wake-up press at zero velocity;
+            # the operator presses the direction again after scans resume.
+            if (
+                requested_nonzero
+                and not self.safety_cloud_fresh()
+                and args.enable_motion
+                and args.transport == "ros_topic"
+                and not args.skip_motion_burst_mode_refresh
+            ):
+                self.refresh_controller_mode()
             if self.is_nonzero(command) and not self.safety_cloud_fresh():
                 command = self.make_stamped()
                 self.warn_sensor_stale()
             self.last_command_monotonic = time.monotonic()
+            was_nonzero = self.sent_nonzero
             self.sent_nonzero = self.is_nonzero(command)
+            if (
+                self.sent_nonzero
+                and not was_nonzero
+                and args.enable_motion
+                and args.transport == "ros_topic"
+                and not args.skip_motion_burst_mode_refresh
+            ):
+                # SetManualMode resets the controller's current velocity.  Do
+                # this once at the start of a motion burst, then publish the
+                # command immediately; repeating it periodically prevents the
+                # chassis from ever beginning to move.
+                self.refresh_controller_mode()
+            self.last_output_command = command
             self.preview_publisher.publish(command)
             try:
                 self.publish_output(command)
@@ -410,6 +492,16 @@ def main() -> None:
                         self.fail_motion(exc)
                 return
             if time.monotonic() - self.last_command_monotonic <= args.watchdog_sec:
+                if self.last_output_command is not None:
+                    try:
+                        # The S2 controller rejects repeated TwistStamped
+                        # samples carrying an unchanged timestamp.
+                        self.last_output_command.header.stamp = (
+                            self.get_clock().now().to_msg()
+                        )
+                        self.publish_output(self.last_output_command)
+                    except (ConnectionError, OSError) as exc:
+                        self.fail_motion(exc)
                 return
             command = self.make_stamped()
             self.preview_publisher.publish(command)

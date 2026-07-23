@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
         default=20.0,
         help="Maximum corrected odometry/TF publication rate.",
     )
+    parser.add_argument(
+        "--preserve-source-stamp",
+        action="store_true",
+        help="Use the controller timestamp for sensor synchronization.",
+    )
     return parser.parse_args()
 
 
@@ -146,7 +151,11 @@ def main() -> None:
             self.last_odom_publish = now
             yaw = odometry_yaw(source.pose.pose.orientation, args.odom_yaw_mode)
             quaternion_z, quaternion_w = quaternion_from_yaw(yaw)
-            stamp = self.get_clock().now().to_msg()
+            stamp = (
+                source.header.stamp
+                if args.preserve_source_stamp
+                else self.get_clock().now().to_msg()
+            )
             position = source.pose.pose.position
 
             odom = Odometry()

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/setup/s2_bundle_env.sh" "${S2_NETWORK_INTERFACE:-}"
+set +u
+source "${ROOT}/tools/s2_nav2_source_env.sh"
+set -u
+[[ -t 0 ]] || { echo "需要在交互式终端运行" >&2; exit 1; }
+
+SESSION="${S2_MAPPING_SESSION:-${ROOT}/output/cartographer_map_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "${SESSION}"
+PIDS=()
+# Give every background command its own process group. `ros2 run` otherwise
+# leaves the real node orphaned when only its wrapper receives Ctrl+C.
+start_bg() { setsid "$@" & PIDS+=("$!"); }
+cleanup() {
+  trap - EXIT INT TERM
+  /usr/bin/python3 "${ROOT}/tools/s2_emergency_stop.py" --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" --robot-id "${S2_ROBOT_ID:-1}" || true
+  for pid in "${PIDS[@]}"; do kill -INT -- "-${pid}" 2>/dev/null || true; done
+  sleep 2
+  for pid in "${PIDS[@]}"; do kill -TERM -- "-${pid}" 2>/dev/null || true; done
+}
+trap cleanup EXIT INT TERM
+
+/usr/bin/python3 "${ROOT}/tools/s2_emergency_stop.py" --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" --robot-id "${S2_ROBOT_ID:-1}"
+start_bg /usr/bin/python3 "${ROOT}/tools/s2_lidar_rviz_bridge.py" --odom-topic /controller/odom --output-odom-topic /s2_lidar_slam/odom --parent-frame odom --child-frame base_link --odom-yaw-mode orientation_w --preserve-source-stamp
+start_bg /usr/bin/python3 "${ROOT}/tools/s2_safety_cloud_relay.py" --input-topic /driver/lidar/point_cloud/Data --output-topic /s2_cartographer/cloud --heartbeat-topic /s2_lidar_slam/cloud_count --resubscribe-sec 1.0
+start_bg ros2 launch "${ROOT}/tools/s2_robot_model.launch.py"
+start_bg ros2 run pointcloud_to_laserscan pointcloud_to_laserscan_node --ros-args -r __node:=s2_fused_cloud_to_scan -r cloud_in:=/s2_cartographer/cloud -r scan:=/s2_cartographer/scan -p target_frame:=base_link -p min_height:=0.10 -p max_height:=1.60 -p range_min:=0.25 -p range_max:=8.0 -p use_inf:=true
+start_bg ros2 run cartographer_ros cartographer_node -configuration_directory "${ROOT}/configs/cartographer" -configuration_basename s2_2d.lua --ros-args -r scan:=/s2_cartographer/scan -r odom:=/s2_lidar_slam/odom
+start_bg ros2 run cartographer_ros cartographer_occupancy_grid_node --ros-args -p resolution:=0.05 -p publish_period_sec:=1.0 -r map:=/s2_lidar_slam/map
+start_bg /usr/bin/python3 "${ROOT}/tools/g1_occupancy_grid_exporter.py" --map-topic /s2_lidar_slam/map --odom-topic /s2_lidar_slam/odom --odom-yaw-mode quaternion --map-frame map --base-frame base_link --output-dir "${SESSION}" --output-prefix map
+start_bg /usr/bin/python3 "${ROOT}/tools/s2_cartographer_save_service.py" --output "${SESSION}/map.pbstream"
+# The controller emits only a short LiDAR burst while stationary. Keep that
+# initial heartbeat valid long enough for the operator's first low-speed move;
+# motion then causes the live stream to resume and refresh the interlock.
+start_bg "${ROOT}/tools/s2_keyboard_mapping_bridge.sh" --transport ros_topic --output-topic /move/ManualMoveCmd --allow-shared-output --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" --robot-id "${S2_ROBOT_ID:-1}" --max-linear-x 0.08 --max-linear-y 0.06 --max-angular-z 0.20 --safety-heartbeat-topic /s2_lidar_slam/cloud_count --safety-cloud-timeout-sec 30.0 --enable-motion
+export S2_RVIZ_LOG="${SESSION}/rviz.log"
+start_bg "${ROOT}/tools/s2_mapping_rviz.sh"
+sleep 5
+for pid in "${PIDS[@]}"; do kill -0 "${pid}" 2>/dev/null || { echo "启动失败 pid=${pid}" >&2; exit 1; }; done
+echo "[s2-cartographer] 地图目录: ${SESSION}；P 保存 pbstream，栅格地图自动持续保存"
+/usr/bin/python3 "${ROOT}/tools/s2_keyboard_mapping_control.py" --linear 0.05 --strafe 0.04 --angular 0.15

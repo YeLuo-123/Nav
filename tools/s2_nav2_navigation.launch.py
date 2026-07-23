@@ -41,6 +41,7 @@ def _robot_state_publisher(context):
 
 def generate_launch_description() -> LaunchDescription:
     params_file = LaunchConfiguration("params_file")
+    map_yaml = LaunchConfiguration("map_yaml")
     use_rviz = LaunchConfiguration("use_rviz")
     enable_motion = LaunchConfiguration("enable_motion")
     allow_shared_output = LaunchConfiguration("allow_shared_output")
@@ -49,6 +50,8 @@ def generate_launch_description() -> LaunchDescription:
     max_linear_x = LaunchConfiguration("max_linear_x")
     max_linear_y = LaunchConfiguration("max_linear_y")
     max_angular_z = LaunchConfiguration("max_angular_z")
+    command_transport = LaunchConfiguration("command_transport")
+    command_output_topic = LaunchConfiguration("command_output_topic")
     log_level = LaunchConfiguration("log_level")
 
     lifecycle_nodes = [
@@ -80,17 +83,34 @@ def generate_launch_description() -> LaunchDescription:
         "--odom-yaw-mode",
         "orientation_w",
     ]
-    command_bridge = [
+    safety_cloud_command = [
         "/usr/bin/python3",
-        str(ROOT / "tools/s2_nav2_cmd_vel_bridge.py"),
+        str(ROOT / "tools/s2_safety_cloud_relay.py"),
+        "--input-topic",
+        "/driver/lidar/point_cloud/Data",
+        "--output-topic",
+        "/s2_lidar_slam/point_cloud",
+        "--heartbeat-topic",
+        "/s2_lidar_slam/cloud_count",
+    ]
+    goal_pose_bridge_command = [
+        "/usr/bin/python3",
+        str(ROOT / "tools/s2_goal_pose_bridge.py"),
+    ]
+    ultrasonic_relay_command = [
+        "/usr/bin/python3",
+        str(ROOT / "tools/s2_ultrasonic_relay.py"),
+    ]
+    command_bridge = [
+        str(ROOT / "tools/s2_keyboard_mapping_bridge.sh"),
         "--input-topic",
         "/s2_nav2/cmd_vel",
         "--preview-topic",
         "/s2_nav2/cmd_vel_preview",
         "--output-topic",
-        "/move/AutoMoveCmd",
+        command_output_topic,
         "--transport",
-        "vendor_websocket",
+        command_transport,
         "--controller-host",
         controller_host,
         "--robot-id",
@@ -106,7 +126,7 @@ def generate_launch_description() -> LaunchDescription:
         "--safety-heartbeat-topic",
         "/s2_lidar_slam/cloud_count",
         "--safety-cloud-timeout-sec",
-        "5.0",
+        "1.0",
     ]
 
     return LaunchDescription(
@@ -115,6 +135,7 @@ def generate_launch_description() -> LaunchDescription:
                 "params_file",
                 default_value=str(ROOT / "configs/navigation/s2_nav2_params.yaml"),
             ),
+            DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("urdf_file", default_value=str(DEFAULT_URDF)),
             DeclareLaunchArgument("use_rviz", default_value="true"),
             DeclareLaunchArgument("enable_motion", default_value="false"),
@@ -124,9 +145,99 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("max_linear_x", default_value="0.12"),
             DeclareLaunchArgument("max_linear_y", default_value="0.10"),
             DeclareLaunchArgument("max_angular_z", default_value="0.30"),
+            DeclareLaunchArgument("command_transport", default_value="ros_topic"),
+            DeclareLaunchArgument(
+                "command_output_topic", default_value="/move/ManualMoveCmd"
+            ),
             DeclareLaunchArgument("log_level", default_value="info"),
             ExecuteProcess(cmd=bridge_command, output="screen"),
+            ExecuteProcess(cmd=safety_cloud_command, output="screen"),
+            ExecuteProcess(cmd=goal_pose_bridge_command, output="screen"),
+            ExecuteProcess(cmd=ultrasonic_relay_command, output="screen"),
             OpaqueFunction(function=_robot_state_publisher),
+            # With no saved map/AMCL, the live mapper builds its map directly
+            # in odometry coordinates.  Publish the identity transform so the
+            # Nav2 global stack can consistently use its configured map frame.
+            Node(
+                condition=UnlessCondition(
+                    PythonExpression(["'", map_yaml, "' != ''"])
+                ),
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="s2_live_map_to_odom",
+                output="screen",
+                arguments=[
+                    "0", "0", "0", "0", "0", "0", "map", "odom"
+                ],
+            ),
+            Node(
+                package="pointcloud_to_laserscan",
+                executable="pointcloud_to_laserscan_node",
+                name="s2_pointcloud_to_laserscan",
+                output="screen",
+                remappings=[
+                    ("cloud_in", "/s2_lidar_slam/point_cloud"),
+                    ("scan", "/s2_lidar_slam/scan"),
+                ],
+                parameters=[
+                    {
+                        "target_frame": "base_link",
+                        "transform_tolerance": 0.10,
+                        "min_height": 0.25,
+                        "max_height": 1.20,
+                        "angle_min": -3.14159,
+                        "angle_max": 3.14159,
+                        "angle_increment": 0.00873,
+                        "scan_time": 0.10,
+                        "range_min": 0.25,
+                        "range_max": 8.0,
+                        "use_inf": True,
+                        "inf_epsilon": 1.0,
+                    }
+                ],
+            ),
+            Node(
+                condition=IfCondition(
+                    PythonExpression(["'", map_yaml, "' != ''"])
+                ),
+                package="nav2_map_server",
+                executable="map_server",
+                name="s2_saved_map_server",
+                output="screen",
+                parameters=[{"yaml_filename": map_yaml, "frame_id": "map"}],
+                remappings=[("map", "/s2_lidar_slam/map")],
+            ),
+            Node(
+                condition=IfCondition(
+                    PythonExpression(["'", map_yaml, "' != ''"])
+                ),
+                package="nav2_amcl",
+                executable="amcl",
+                name="amcl",
+                output="screen",
+                parameters=[params_file],
+                remappings=[
+                    ("map", "/s2_lidar_slam/map"),
+                    ("scan", "/s2_lidar_slam/scan"),
+                ],
+            ),
+            Node(
+                condition=IfCondition(
+                    PythonExpression(["'", map_yaml, "' != ''"])
+                ),
+                package="nav2_lifecycle_manager",
+                executable="lifecycle_manager",
+                name="lifecycle_manager_saved_map",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": False,
+                        "autostart": True,
+                        "node_names": ["s2_saved_map_server", "amcl"],
+                        "bond_timeout": 4.0,
+                    }
+                ],
+            ),
             Node(
                 package="nav2_controller",
                 executable="controller_server",

@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-prefix", default="lidar_nav_map_latest")
     parser.add_argument("--map-topic", default="/s2_lidar_slam/map")
     parser.add_argument("--output-cloud-topic", default="/s2_lidar_slam/point_cloud")
+    parser.add_argument("--ultrasonic-topic", default="/s2_ultrasonic/points")
+    parser.add_argument("--glass-inflation-m", type=float, default=0.18)
+    parser.add_argument("--glass-hit-log-odds", type=float, default=0.70)
+    parser.add_argument("--glass-miss-log-odds", type=float, default=0.08)
+    parser.add_argument("--glass-occupied-log-odds", type=float, default=1.10)
+    parser.add_argument("--glass-max-range", type=float, default=3.50)
     parser.add_argument("--cloud-publish-hz", type=float, default=3.0)
     parser.add_argument("--output-cloud-max-points", type=int, default=12000)
     parser.add_argument("--map-frame", default="map")
@@ -49,6 +55,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--map-size-m", type=float, default=60.0)
     parser.add_argument("--min-z", type=float, default=0.10)
     parser.add_argument("--max-z", type=float, default=0.80)
+    parser.add_argument(
+        "--overhang-min-z",
+        type=float,
+        default=0.35,
+        help="Minimum height for mark-only 3D obstacle projection (tables, shelves, etc.).",
+    )
+    parser.add_argument("--overhang-max-z", type=float, default=1.60)
+    parser.add_argument(
+        "--overhang-inflation-m",
+        type=float,
+        default=0.10,
+        help="2D padding applied to elevated returns before merging the obstacle layer.",
+    )
+    parser.add_argument("--overhang-hit-log-odds", type=float, default=0.70)
+    parser.add_argument(
+        "--overhang-miss-log-odds",
+        type=float,
+        default=0.20,
+        help="Per-scan decay for stale elevated obstacles still inside sensor range.",
+    )
+    parser.add_argument("--overhang-occupied-log-odds", type=float, default=1.10)
     parser.add_argument("--min-range", type=float, default=0.25)
     parser.add_argument("--max-range", type=float, default=8.0)
     parser.add_argument("--self-filter-half-x", type=float, default=0.48)
@@ -161,6 +188,88 @@ class OccupancyAccumulator:
         return values
 
 
+class ElevatedObstacleLayer:
+    """Temporally filtered projection for obstacles above traversable free space.
+
+    A conventional 2D inverse sensor model clears every projected ray.  That is
+    incorrect for a 3D ray passing below a table top: the free return below the
+    top must not erase the table's XY footprint.  This layer is consequently
+    accumulated independently.  Misses only decay cells that remain inside the
+    current sensor range, so moving people leave no permanent trail while
+    unobserved parts of the static map do not disappear merely because the
+    robot drove away.
+    """
+
+    def __init__(
+        self,
+        size: int,
+        resolution: float,
+        hit_log_odds: float,
+        miss_log_odds: float,
+    ) -> None:
+        self.resolution = float(resolution)
+        self.hit_log_odds = float(hit_log_odds)
+        self.miss_log_odds = float(miss_log_odds)
+        self.log_odds = np.zeros((size, size), dtype=np.float32)
+        self.observed = np.zeros((size, size), dtype=bool)
+
+    def integrate(
+        self,
+        accumulator: OccupancyAccumulator,
+        sensor_xy: tuple[float, float],
+        endpoints_xy: np.ndarray,
+        inflation_m: float,
+        observation_range_m: float,
+    ) -> int:
+        cells = {
+            cell
+            for x, y in endpoints_xy
+            for cell in [accumulator.cell(float(x), float(y))]
+            if cell is not None
+        }
+        hits = np.zeros_like(self.observed, dtype=np.uint8)
+        if cells:
+            rows, cols = zip(*cells)
+            hits[np.asarray(rows), np.asarray(cols)] = 1
+        radius_cells = max(0, int(math.ceil(float(inflation_m) / self.resolution)))
+        if radius_cells:
+            diameter = 2 * radius_cells + 1
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (diameter, diameter)
+            )
+            hits = cv2.dilate(hits, kernel)
+        marked = hits.astype(bool)
+        sensor_cell = accumulator.cell(*sensor_xy)
+        if sensor_cell is not None:
+            radius_cells = max(
+                0, int(math.ceil(float(observation_range_m) / self.resolution))
+            )
+            row0 = max(0, sensor_cell[0] - radius_cells)
+            row1 = min(self.log_odds.shape[0], sensor_cell[0] + radius_cells + 1)
+            col0 = max(0, sensor_cell[1] - radius_cells)
+            col1 = min(self.log_odds.shape[1], sensor_cell[1] + radius_cells + 1)
+            rows_grid, cols_grid = np.ogrid[row0:row1, col0:col1]
+            in_range = (
+                (rows_grid - sensor_cell[0]) ** 2
+                + (cols_grid - sensor_cell[1]) ** 2
+                <= radius_cells**2
+            )
+            stale = self.observed[row0:row1, col0:col1] & in_range
+            stale &= ~marked[row0:row1, col0:col1]
+            local_odds = self.log_odds[row0:row1, col0:col1]
+            local_odds[stale] -= self.miss_log_odds
+            expired = stale & (local_odds <= 0.0)
+            self.observed[row0:row1, col0:col1][expired] = False
+            local_odds[expired] = 0.0
+        self.observed[marked] = True
+        self.log_odds[marked] += self.hit_log_odds
+        np.clip(self.log_odds, 0.0, 3.5, out=self.log_odds)
+        return len(cells)
+
+    def occupied(self, threshold: float) -> np.ndarray:
+        return self.observed & (self.log_odds >= float(threshold))
+
+
 def pointcloud_xyz(msg: Any) -> np.ndarray:
     from sensor_msgs_py import point_cloud2
 
@@ -243,6 +352,21 @@ def main() -> None:
                 hit_log_odds=float(args.hit_log_odds),
                 miss_log_odds=float(args.miss_log_odds),
             )
+            self.overhang_layer = ElevatedObstacleLayer(
+                self.accumulator.size,
+                self.accumulator.resolution,
+                float(args.overhang_hit_log_odds),
+                float(args.overhang_miss_log_odds),
+            )
+            # Glass frequently produces no usable LiDAR return. The robot's
+            # ultrasonic endpoints are accumulated separately so ordinary
+            # LiDAR free-space rays cannot erase a confirmed glass obstacle.
+            self.glass_layer = ElevatedObstacleLayer(
+                self.accumulator.size,
+                self.accumulator.resolution,
+                float(args.glass_hit_log_odds),
+                float(args.glass_miss_log_odds),
+            )
             self.latest_pose: tuple[float, list[float]] | None = None
             self.odom_history: deque[tuple[float, float, list[float]]] = deque()
             self.last_cloud_at = 0.0
@@ -250,6 +374,9 @@ def main() -> None:
             self.cloud_count = 0
             self.integrated_scan_count = 0
             self.integrated_ray_count = 0
+            self.overhang_point_count = 0
+            self.glass_point_count = 0
+            self.ultrasonic_count = 0
             self.sync_skip_count = 0
             self.self_filtered_point_count = 0
             self.latest_cloud_odom_delta_sec: float | None = None
@@ -275,6 +402,9 @@ def main() -> None:
             )
             self.create_subscription(Odometry, args.odom_topic, self.on_odom, sensor_qos)
             self.create_subscription(PointCloud2, args.cloud_topic, self.on_cloud, sensor_qos)
+            self.create_subscription(
+                PointCloud2, args.ultrasonic_topic, self.on_ultrasonic, sensor_qos
+            )
             self.create_timer(1.0 / max(0.1, float(args.export_hz)), self.export)
             self.create_service(Trigger, args.save_service, self.on_save_map)
 
@@ -395,13 +525,59 @@ def main() -> None:
                 & (distance <= float(args.max_range))
             )
             endpoints = map_points[keep, :2]
-            if endpoints.size == 0:
+            overhang_keep = (
+                (valid_points[:, 2] >= float(args.overhang_min_z))
+                & (valid_points[:, 2] <= float(args.overhang_max_z))
+                & (distance >= float(args.min_range))
+                & (distance <= float(args.max_range))
+            )
+            overhang_endpoints = map_points[overhang_keep, :2]
+            if endpoints.size == 0 and overhang_endpoints.size == 0:
                 return
+            self.accumulator.initialize(pose[0], pose[1])
+            self.overhang_point_count += self.overhang_layer.integrate(
+                self.accumulator,
+                (pose[0], pose[1]),
+                overhang_endpoints,
+                float(args.overhang_inflation_m),
+                float(args.max_range),
+            )
             rays = self.accumulator.integrate(
                 (pose[0], pose[1]), endpoints, int(args.max_rays_per_scan)
             )
             self.integrated_scan_count += 1
             self.integrated_ray_count += rays
+
+        def on_ultrasonic(self, msg: PointCloud2) -> None:
+            """Fuse short-range ultrasonic returns as a decaying glass layer."""
+            self.ultrasonic_count += 1
+            if self.latest_pose is None:
+                return
+            pose_age = max(0.0, time.time() - self.latest_pose[0])
+            if pose_age > float(args.odom_stale_sec):
+                return
+            pose = list(self.latest_pose[1])
+            points = pointcloud_xyz(msg)
+            if points.size:
+                finite = np.isfinite(points).all(axis=1)
+                distance = np.linalg.norm(points[:, :2], axis=1)
+                keep = finite & (distance >= float(args.min_range)) & (
+                    distance <= float(args.glass_max_range)
+                )
+                points = points[keep]
+            self.accumulator.initialize(pose[0], pose[1])
+            endpoints = (
+                transform_base_points(points, pose)[:, :2]
+                if points.size
+                else np.empty((0, 2), dtype=np.float32)
+            )
+            self.glass_point_count += self.glass_layer.integrate(
+                self.accumulator,
+                (pose[0], pose[1]),
+                endpoints,
+                float(args.glass_inflation_m),
+                float(args.glass_max_range),
+            )
 
         def export(self, save_to_disk: bool = False) -> None:
             if self.accumulator.origin_x is None:
@@ -409,6 +585,16 @@ def main() -> None:
             values = self.accumulator.occupancy_values(
                 float(args.occupied_log_odds), float(args.free_log_odds)
             )
+            overhang_occupied = self.overhang_layer.occupied(
+                float(args.overhang_occupied_log_odds)
+            )
+            glass_occupied = self.glass_layer.occupied(
+                float(args.glass_occupied_log_odds)
+            )
+            # Merge after normal ray clearing so low rays passing through an
+            # open underside cannot erase the elevated collision footprint.
+            values[overhang_occupied] = 100
+            values[glass_occupied] = 100
             raw_image = np.full(values.shape, 205, dtype=np.uint8)
             raw_image[values == 0] = 254
             raw_image[values == 100] = 0
@@ -456,6 +642,29 @@ def main() -> None:
                 "resolution_m": float(args.resolution),
                 "origin": map_yaml["origin"],
                 "height_slice_m": [float(args.min_z), float(args.max_z)],
+                "overhang_obstacle_layer": {
+                    "height_slice_m": [
+                        float(args.overhang_min_z),
+                        float(args.overhang_max_z),
+                    ],
+                    "inflation_m": float(args.overhang_inflation_m),
+                    "hit_log_odds": float(args.overhang_hit_log_odds),
+                    "miss_log_odds": float(args.overhang_miss_log_odds),
+                    "occupied_log_odds": float(args.overhang_occupied_log_odds),
+                    "occupied_cell_count": int(overhang_occupied.sum()),
+                    "integrated_point_cell_count": self.overhang_point_count,
+                },
+                "glass_ultrasonic_layer": {
+                    "topic": str(args.ultrasonic_topic),
+                    "range_m": [float(args.min_range), float(args.glass_max_range)],
+                    "inflation_m": float(args.glass_inflation_m),
+                    "hit_log_odds": float(args.glass_hit_log_odds),
+                    "miss_log_odds": float(args.glass_miss_log_odds),
+                    "occupied_log_odds": float(args.glass_occupied_log_odds),
+                    "message_count": self.ultrasonic_count,
+                    "occupied_cell_count": int(glass_occupied.sum()),
+                    "integrated_point_cell_count": self.glass_point_count,
+                },
                 "range_m": [float(args.min_range), float(args.max_range)],
                 "robot_xyt": robot_xyt,
                 "pose_valid": robot_xyt is not None,

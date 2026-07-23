@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 import numpy as np
 
@@ -18,6 +19,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-points", type=int, default=3000)
     parser.add_argument("--self-filter-half-x", type=float, default=0.48)
     parser.add_argument("--self-filter-half-y", type=float, default=0.38)
+    parser.add_argument(
+        "--resubscribe-sec",
+        type=float,
+        default=0.0,
+        help="Recreate the controller DDS subscription after this idle time (0 disables).",
+    )
     return parser.parse_args()
 
 
@@ -42,6 +49,12 @@ def main() -> None:
         reliability=ReliabilityPolicy.BEST_EFFORT,
         durability=DurabilityPolicy.VOLATILE,
     )
+    cloud_pub_qos = QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+    )
 
     class SafetyCloudRelay(Node):
         def __init__(self) -> None:
@@ -49,14 +62,35 @@ def main() -> None:
             self.count = 0
             self.last_publish_ns = 0
             self.cloud_publisher = self.create_publisher(
-                PointCloud2, args.output_topic, qos
+                PointCloud2, args.output_topic, cloud_pub_qos
             )
             self.heartbeat_publisher = self.create_publisher(
                 UInt64, args.heartbeat_topic, qos
             )
-            self.create_subscription(PointCloud2, args.input_topic, self.on_cloud, qos)
+            self.last_receive_at = time.monotonic()
+            self.subscription = self.create_subscription(
+                PointCloud2, args.input_topic, self.on_cloud, qos
+            )
+            if float(args.resubscribe_sec) > 0.0:
+                self.create_timer(
+                    max(0.2, float(args.resubscribe_sec) * 0.5), self.check_subscription
+                )
+
+        def check_subscription(self) -> None:
+            idle = time.monotonic() - self.last_receive_at
+            if idle < float(args.resubscribe_sec):
+                return
+            self.destroy_subscription(self.subscription)
+            self.subscription = self.create_subscription(
+                PointCloud2, args.input_topic, self.on_cloud, qos
+            )
+            self.last_receive_at = time.monotonic()
+            self.get_logger().warning(
+                f"Recreated idle controller cloud subscription after {idle:.2f}s"
+            )
 
         def on_cloud(self, message: PointCloud2) -> None:
+            self.last_receive_at = time.monotonic()
             self.count += 1
             heartbeat = UInt64()
             heartbeat.data = self.count
@@ -97,7 +131,11 @@ def main() -> None:
                 points = points[indices]
 
             header = Header()
-            header.stamp = self.get_clock().now().to_msg()
+            # Preserve the controller source clock so downstream mapping can
+            # synchronize this cloud with /controller/odom.  Re-stamping with
+            # the host clock makes the streams differ by months after a robot
+            # controller reboot and causes every scan to be rejected.
+            header.stamp = message.header.stamp
             header.frame_id = str(args.frame_id)
             self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, points))
             self.last_publish_ns = now_ns

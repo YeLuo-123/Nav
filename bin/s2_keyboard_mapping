@@ -73,12 +73,16 @@ start_bg /usr/bin/python3 "${ROOT}/tools/s2_registered_cloud_mapper.py" \
   --output-dir "${SESSION}" \
   --output-prefix map \
   --cloud-frame-mode base \
-  --cloud-publish-hz 0 \
+  --cloud-publish-hz "${S2_MAPPING_CLOUD_PUBLISH_HZ:-2.0}" \
   --integration-hz 0.5 \
   --export-hz 0.1 \
   --max-rays-per-scan 1200 \
   --map-frame odom \
   --min-z 0.25 --max-z 1.20 --max-range 8.0 \
+  --overhang-min-z "${S2_OVERHANG_MIN_Z:-0.35}" \
+  --overhang-max-z "${S2_OVERHANG_MAX_Z:-1.60}" \
+  --overhang-inflation-m "${S2_OVERHANG_INFLATION_M:-0.10}" \
+  --overhang-miss-log-odds "${S2_OVERHANG_MISS_LOG_ODDS:-0.20}" \
   --max-cloud-odom-delta-sec 0.05 \
   --manual-save-only
 
@@ -88,16 +92,23 @@ start_bg /usr/bin/python3 "${ROOT}/tools/s2_lidar_rviz_bridge.py" \
   --parent-frame odom --child-frame base_link \
   --odom-yaw-mode orientation_w
 
+# Feed the mapper's glass layer and keep sparse transparent obstacles visible.
+start_bg /usr/bin/python3 "${ROOT}/tools/s2_ultrasonic_relay.py"
+
 start_bg ros2 launch "${ROOT}/tools/s2_robot_model.launch.py"
 
 start_bg "${ROOT}/tools/s2_keyboard_mapping_bridge.sh" \
+  --transport ros_topic \
+  --output-topic /move/ManualMoveCmd \
+  --allow-shared-output \
+  --skip-motion-burst-mode-refresh \
   --controller-host "${S2_CONTROLLER_IP:-192.168.127.10}" \
   --robot-id "${S2_ROBOT_ID:-1}" \
-  --max-linear-x "${S2_KEYBOARD_MAX_LINEAR_X:-0.06}" \
-  --max-linear-y "${S2_KEYBOARD_MAX_LINEAR_Y:-0.06}" \
-  --max-angular-z "${S2_KEYBOARD_MAX_ANGULAR_Z:-0.20}" \
+  --max-linear-x "${S2_KEYBOARD_BRIDGE_MAX_LINEAR_X:-0.12}" \
+  --max-linear-y "${S2_KEYBOARD_BRIDGE_MAX_LINEAR_Y:-0.12}" \
+  --max-angular-z "${S2_KEYBOARD_BRIDGE_MAX_ANGULAR_Z:-0.40}" \
   --safety-heartbeat-topic /s2_lidar_slam/cloud_count \
-  --safety-cloud-timeout-sec 5.0 \
+  --safety-cloud-timeout-sec 1.0 \
   "${MOTION_ARGS[@]}"
 
 export S2_RVIZ_LOG="${SESSION}/rviz.log"

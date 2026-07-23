@@ -21,6 +21,12 @@ if [[ -z "${S2_NETWORK_INTERFACE}" ]]; then
 fi
 export S2_NETWORK_INTERFACE="${S2_NETWORK_INTERFACE:-eno1}"
 
+# Controller HTTP/WebSocket traffic must never pass through a desktop proxy.
+# Some curl/urllib versions do not match CIDR entries in no_proxy reliably, so
+# include the exact robot address in both conventional variable spellings.
+export no_proxy="${S2_CONTROLLER_IP},${no_proxy:-}"
+export NO_PROXY="${S2_CONTROLLER_IP},${NO_PROXY:-${no_proxy}}"
+
 dds_safe_interface="${S2_NETWORK_INTERFACE//[^A-Za-z0-9_.-]/_}"
 dds_runtime="${TMPDIR:-/tmp}/s2_cyclonedds_${USER:-user}_${dds_safe_interface}.xml"
 cat >"${dds_runtime}" <<EOF
@@ -51,4 +57,3 @@ export CYCLONEDDS_URI="file://${S2_CYCLONEDDS_CONFIG}"
 
 echo "[s2-bundle] root=${S2_BUNDLE_ROOT}"
 echo "[s2-bundle] interface=${S2_NETWORK_INTERFACE} host=${S2_HOST_CIDR} controller=${S2_CONTROLLER_IP}"
-

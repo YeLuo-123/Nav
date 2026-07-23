@@ -22,6 +22,8 @@ S2 键盘建图
   a / d       左转 / 右转
   q / e       左移 / 右移
   空格或 x    立即停止
+  + / =       提高移动和旋转速度
+  -           降低移动和旋转速度
   p           手动保存当前地图
   h           再次显示帮助
   Ctrl+C      停止并退出
@@ -37,6 +39,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--linear", type=float, default=0.06)
     parser.add_argument("--strafe", type=float, default=0.06)
     parser.add_argument("--angular", type=float, default=0.20)
+    parser.add_argument("--speed-scale-step", type=float, default=0.25)
+    parser.add_argument("--min-speed-scale", type=float, default=0.50)
+    parser.add_argument("--max-speed-scale", type=float, default=2.00)
     return parser.parse_args()
 
 
@@ -46,6 +51,7 @@ class KeyboardMapping(Node):
         self.args = args
         self.publisher = self.create_publisher(Twist, args.cmd_topic, 10)
         self.save_client = self.create_client(Trigger, args.save_service)
+        self.speed_scale = 1.0
 
     def stop(self) -> None:
         self.publisher.publish(Twist())
@@ -53,18 +59,34 @@ class KeyboardMapping(Node):
     def command(self, key: str) -> None:
         msg = Twist()
         if key == "w":
-            msg.linear.x = self.args.linear
+            msg.linear.x = self.args.linear * self.speed_scale
         elif key == "s":
-            msg.linear.x = -self.args.linear
+            msg.linear.x = -self.args.linear * self.speed_scale
         elif key == "a":
-            msg.angular.z = self.args.angular
+            msg.angular.z = self.args.angular * self.speed_scale
         elif key == "d":
-            msg.angular.z = -self.args.angular
+            msg.angular.z = -self.args.angular * self.speed_scale
         elif key == "q":
-            msg.linear.y = self.args.strafe
+            msg.linear.y = self.args.strafe * self.speed_scale
         elif key == "e":
-            msg.linear.y = -self.args.strafe
+            msg.linear.y = -self.args.strafe * self.speed_scale
         self.publisher.publish(msg)
+
+    def adjust_speed(self, increase: bool) -> None:
+        delta = self.args.speed_scale_step * (1.0 if increase else -1.0)
+        self.speed_scale = max(
+            self.args.min_speed_scale,
+            min(self.args.max_speed_scale, self.speed_scale + delta),
+        )
+        self.stop()
+        print(
+            "\n[速度] "
+            f"倍率={self.speed_scale:.2f} "
+            f"前后={self.args.linear * self.speed_scale:.3f} m/s "
+            f"横移={self.args.strafe * self.speed_scale:.3f} m/s "
+            f"旋转={self.args.angular * self.speed_scale:.3f} rad/s",
+            flush=True,
+        )
 
     def save(self) -> None:
         self.stop()
@@ -105,6 +127,10 @@ def main() -> None:
                 node.command(key)
             elif key in (" ", "x"):
                 node.stop()
+            elif key in ("+", "="):
+                node.adjust_speed(increase=True)
+            elif key == "-":
+                node.adjust_speed(increase=False)
             elif key == "p":
                 node.save()
             elif key == "h":
